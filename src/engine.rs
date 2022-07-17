@@ -1,7 +1,6 @@
-//! The [`Engine`] trait defines a specific set of matching behaviors.
-
 use std::hash::Hash;
 
+/// The [`Engine`] trait defines a specific set of matching behaviors.
 pub trait Engine: Hash + Clone {
     /// The type of token the engine operates on.
     type Token;
