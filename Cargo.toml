@@ -1,0 +1,11 @@
+[package]
+name = "irregex"
+version = "0.1.0"
+edition = "2021"
+authors = ["emily Crandall Fleischman <emilycf@mit.edu>"]
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+derivative = "2.2.0"
