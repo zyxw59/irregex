@@ -338,6 +338,18 @@ impl<E: Engine> Pattern<E> for Instr<E> {
     }
 }
 
+impl<E, F, Error> Pattern<E> for F
+where
+    E: Engine,
+    F: FnOnce(&mut Program<E>) -> Result<(), Error>,
+{
+    type Error = Error;
+
+    fn write_program(self, program: &mut Program<E>) -> Result<(), Self::Error> {
+        self(program)
+    }
+}
+
 /// Type for indexing into a program
 pub type InstrPtr = usize;
 

@@ -1,4 +1,4 @@
-use crate::{engine, program};
+use crate::{engine, program, Program};
 
 #[derive(Clone, Debug, Hash)]
 pub struct Engine {
@@ -41,11 +41,13 @@ impl engine::Engine for Engine {
     }
 }
 
+#[derive(Debug)]
 pub enum Consume {
     Any,
     Token(char),
 }
 
+#[derive(Debug)]
 pub enum Peek {
     WordBoundary,
     Save(usize),
@@ -55,43 +57,33 @@ pub enum Peek {
 fn program() {
     use self::program::Instr;
     // /(ab?)(b?c)\b/
-    let prog: Vec<program::Instr<Engine>> = vec![
-        // 0: *? quantifier
-        Instr::JSplit(3),
-        // 1: match a token
-        Instr::Consume(Consume::Any),
-        // 2: repeat
-        Instr::Jump(0),
-        // 3: save start of match
-        Instr::Peek(Peek::Save(0)),
-        // 4: save start of first subgroup
-        Instr::Peek(Peek::Save(2)),
-        // 5: a
-        Instr::Consume(Consume::Token('a')),
-        // 6: optional b
-        Instr::Split(8),
-        // 7: b
-        Instr::Consume(Consume::Token('b')),
-        // 8: save end of first subgroup
-        Instr::Peek(Peek::Save(3)),
-        // 9: save start of second subgroup
-        Instr::Peek(Peek::Save(4)),
-        // 10: optional b
-        Instr::Split(12),
-        // 11: b
-        Instr::Consume(Consume::Token('b')),
-        // 12: c
-        Instr::Consume(Consume::Token('c')),
-        // 13: save end of second subgroup
-        Instr::Peek(Peek::Save(5)),
-        // 14: word boundary
-        Instr::Peek(Peek::WordBoundary),
-        // 15: save end of match
-        Instr::Peek(Peek::Save(1)),
-        // 16: end of match
-        Instr::Match,
-    ];
-    let program = program::Program { prog };
+    let mut program = Program::floating_start();
+    // save start of match
+    program.push(Instr::Peek(Peek::Save(0)));
+    // save start of first subgroup
+    program.push(Instr::Peek(Peek::Save(2)));
+    // a
+    program.push(Instr::Consume(Consume::Token('a')));
+    // b?
+    program.zero_or_one(Instr::Consume(Consume::Token('b')), true)
+        .unwrap();
+    // save end of first subgroup
+    program.push(Instr::Peek(Peek::Save(3)));
+    // save start of second subgroup
+    program.push(Instr::Peek(Peek::Save(4)));
+    // b?
+    program.zero_or_one(Instr::Consume(Consume::Token('b')), true)
+        .unwrap();
+    // c
+    program.push(Instr::Consume(Consume::Token('c')));
+    // save end of second subgroup
+    program.push(Instr::Peek(Peek::Save(5)));
+    // word boundary
+    program.push(Instr::Peek(Peek::WordBoundary));
+    // save end of match
+    program.push(Instr::Peek(Peek::Save(1)));
+
+    println!("{program}");
     let saves = program.exec(Engine::new(6), "ducabc ".chars());
     assert_eq!(
         saves.iter().map(|engine| &engine.saves).collect::<Vec<_>>(),
