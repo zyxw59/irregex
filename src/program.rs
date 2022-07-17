@@ -28,6 +28,14 @@ impl<E: Engine> Program<E> {
         this
     }
 
+    /// Append the given pattern to the program.
+    pub fn concatenate<P>(&mut self, pattern: P) -> Result<&mut Self, P::Error>
+    where
+        P: Pattern<E>,
+    {
+        pattern.write_program(self).map(|()| self)
+    }
+
     /// A builder for a program which will match from a set of sub-patterns. Earlier sub-patterns
     /// will be preferentially matched.
     pub fn alternates(&mut self) -> Alternates<'_, E> {
@@ -109,6 +117,16 @@ impl<E: Engine> Program<E> {
         Ok(self)
     }
 
+    /// Pushes the given [`Peek`](Instr::Peek) instruction to the program.
+    pub fn peek(&mut self, args: E::Peek) {
+        self.push(Instr::Peek(args));
+    }
+
+    /// Pushes the given [`Consume`](Instr::Consume) instruction to the program.
+    pub fn consume(&mut self, args: E::Consume) {
+        self.push(Instr::Consume(args));
+    }
+
     /// Executes the program. Returns a vector of matches found. For each match, the state of the
     /// engine is returned.
     pub fn exec<I>(&self, initial_state: E, input: I) -> Vec<E>
@@ -147,14 +165,16 @@ impl<E: Engine> Program<E> {
                 if let Some(pc) = th.pc {
                     match &self[pc] {
                         Instr::Any => {
-                            next.add_thread(
-                                pc + 1,
-                                i + 1,
-                                input.peek().map(|(_i, tok)| tok),
-                                self,
-                                &mut prune_list,
-                                th.engine,
-                            );
+                            if th.engine.any(i, &tok_i) {
+                                next.add_thread(
+                                    pc + 1,
+                                    i + 1,
+                                    input.peek().map(|(_i, tok)| tok),
+                                    self,
+                                    &mut prune_list,
+                                    th.engine,
+                                );
+                            }
                         }
                         Instr::Consume(args) => {
                             if th.engine.consume(args, i, &tok_i) {
@@ -338,15 +358,16 @@ impl<E: Engine> Pattern<E> for Instr<E> {
     }
 }
 
-impl<E, F, Error> Pattern<E> for F
+impl<E, I, P> Pattern<E> for I
 where
     E: Engine,
-    F: FnOnce(&mut Program<E>) -> Result<(), Error>,
+    I: IntoIterator<Item = P>,
+    P: Pattern<E>,
 {
-    type Error = Error;
+    type Error = P::Error;
 
     fn write_program(self, program: &mut Program<E>) -> Result<(), Self::Error> {
-        self(program)
+        self.into_iter().try_fold(program, Program::concatenate).map(|_| ())
     }
 }
 

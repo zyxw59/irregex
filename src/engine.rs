@@ -14,4 +14,10 @@ pub trait Engine: Hash + Clone {
 
     /// Call the [`Peek`](crate::program::Instr::Peek) instruction.
     fn peek(&mut self, args: &Self::Peek, index: usize, token: Option<&Self::Token>) -> bool;
+
+    /// Call the [`Any`](crate::program::Instr::Any) instruction. This is necessary if the engine
+    /// needs to store state for each token.
+    fn any(&mut self, _index: usize, _token: &Self::Token) -> bool {
+        true
+    }
 }

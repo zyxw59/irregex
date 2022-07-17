@@ -3,48 +3,44 @@ use crate::{engine, program, Program};
 #[derive(Clone, Debug, Hash)]
 pub struct Engine {
     saves: Vec<Option<usize>>,
-    is_word: bool,
+    is_whitespace: bool,
 }
 
 impl Engine {
     fn new(num_slots: usize) -> Self {
         Engine {
             saves: vec![None; num_slots],
-            is_word: false,
+            is_whitespace: true,
         }
     }
 }
 
 impl engine::Engine for Engine {
     type Token = char;
-    type Consume = Consume;
+    type Consume = char;
     type Peek = Peek;
 
-    fn consume(&mut self, args: &Self::Consume, _index: usize, token: &Self::Token) -> bool {
-        self.is_word = !token.is_whitespace();
-        match args {
-            Consume::Any => true,
-            Consume::Token(expected) => expected == token,
-        }
+    fn consume(&mut self, expected: &Self::Consume, _index: usize, token: &Self::Token) -> bool {
+        self.is_whitespace = token.is_whitespace();
+        expected == token
     }
 
     fn peek(&mut self, args: &Self::Peek, index: usize, token: Option<&Self::Token>) -> bool {
         match args {
-            Peek::WordBoundary => token
-                .as_ref()
-                .map_or(true, |tok| !tok.is_whitespace() ^ self.is_word),
+            Peek::WordBoundary => {
+                token.map_or(true, |tok| tok.is_whitespace() ^ self.is_whitespace)
+            }
             Peek::Save(slot) => {
                 self.saves[*slot] = Some(index);
                 true
             }
         }
     }
-}
 
-#[derive(Debug)]
-pub enum Consume {
-    Any,
-    Token(char),
+    fn any(&mut self, _index: usize, token: &Self::Token) -> bool {
+        self.is_whitespace = token.is_whitespace();
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -59,29 +55,27 @@ fn program() {
     // /(ab?)(b?c)\b/
     let mut program = Program::floating_start();
     // save start of match
-    program.push(Instr::Peek(Peek::Save(0)));
+    program.peek(Peek::Save(0));
     // save start of first subgroup
-    program.push(Instr::Peek(Peek::Save(2)));
+    program.peek(Peek::Save(2));
     // a
-    program.push(Instr::Consume(Consume::Token('a')));
+    program.consume('a');
     // b?
-    program.zero_or_one(Instr::Consume(Consume::Token('b')), true)
-        .unwrap();
+    program.zero_or_one(Instr::Consume('b'), true).unwrap();
     // save end of first subgroup
-    program.push(Instr::Peek(Peek::Save(3)));
+    program.peek(Peek::Save(3));
     // save start of second subgroup
-    program.push(Instr::Peek(Peek::Save(4)));
+    program.peek(Peek::Save(4));
     // b?
-    program.zero_or_one(Instr::Consume(Consume::Token('b')), true)
-        .unwrap();
+    program.zero_or_one(Instr::Consume('b'), true).unwrap();
     // c
-    program.push(Instr::Consume(Consume::Token('c')));
+    program.consume('c');
     // save end of second subgroup
-    program.push(Instr::Peek(Peek::Save(5)));
+    program.peek(Peek::Save(5));
     // word boundary
-    program.push(Instr::Peek(Peek::WordBoundary));
+    program.peek(Peek::WordBoundary);
     // save end of match
-    program.push(Instr::Peek(Peek::Save(1)));
+    program.peek(Peek::Save(1));
 
     println!("{program}");
     let saves = program.exec(Engine::new(6), "ducabc ".chars());
@@ -107,30 +101,17 @@ fn program() {
 #[test]
 fn precedence_of_alternates() {
     use self::program::Instr;
-    // /.*?(ab|b)/
-    let prog: Vec<program::Instr<Engine>> = vec![
-        // 0: don't repeat if possible
-        Instr::JSplit(3),
-        // 1: .
-        Instr::Consume(Consume::Any),
-        // 2: try to repeat
-        Instr::Jump(0),
-        // 3: start of match
-        Instr::Peek(Peek::Save(0)),
-        // 4: ab|b
-        Instr::Split(6),
-        // 5: a
-        Instr::Consume(Consume::Token('a')),
-        // 6: b
-        Instr::Consume(Consume::Token('b')),
-        // 7: jump to end of match
-        Instr::Jump(9),
-        // 8: b
-        Instr::Consume(Consume::Token('b')),
-        // 9: end of match
-        Instr::Peek(Peek::Save(1)),
-    ];
-    let program = program::Program { prog };
+    // /ab|b/
+    let mut program = Program::floating_start();
+    program.peek(Peek::Save(0));
+    program
+        .alternates()
+        .add([Instr::Consume('a'), Instr::Consume('b')])
+        .unwrap()
+        .add_finish(Instr::Consume('b'))
+        .unwrap();
+    program.peek(Peek::Save(1));
+    println!("{program}");
     let saves = program.exec(Engine::new(2), "ab".chars());
     // 'ab' matches first, even tho 'b' has higher precedence, because 'ab' starts earlier
     assert_eq!(
