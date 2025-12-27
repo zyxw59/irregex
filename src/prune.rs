@@ -1,5 +1,5 @@
 use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::{BuildHasher, Hash};
 
 pub struct PruneList<S = RandomState> {
     last_seen: Vec<Option<ThreadStateHash>>,
@@ -20,11 +20,7 @@ impl<S: BuildHasher> PruneList<S> {
     /// Inserts the thread state into the list, and returns `true` if the state has been seen
     /// before.
     pub fn insert<E: Hash>(&mut self, pc: usize, state: &E, input_idx: usize) -> bool {
-        let engine_hash = {
-            let mut hasher = self.hasher.build_hasher();
-            state.hash(&mut hasher);
-            hasher.finish()
-        };
+        let engine_hash = self.hasher.hash_one(state);
         let new_state = ThreadStateHash {
             engine_hash,
             input_idx,
