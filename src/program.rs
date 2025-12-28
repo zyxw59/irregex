@@ -367,7 +367,9 @@ where
     type Error = P::Error;
 
     fn write_program(self, program: &mut Program<E>) -> Result<(), Self::Error> {
-        self.into_iter().try_fold(program, Program::concatenate).map(|_| ())
+        self.into_iter()
+            .try_fold(program, Program::concatenate)
+            .map(|_| ())
     }
 }
 
