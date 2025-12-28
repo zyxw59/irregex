@@ -1,7 +1,7 @@
 use std::hash::Hash;
 
 /// The [`Engine`] trait defines a specific set of matching behaviors.
-pub trait Engine: Hash + Clone {
+pub trait Engine: Hash + Eq + Clone {
     /// The type of token the engine operates on.
     type Token;
     /// The type for the [`Consume`](crate::program::Instr::Consume) instruction.

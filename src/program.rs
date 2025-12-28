@@ -1,8 +1,13 @@
-use std::fmt;
-use std::mem;
-use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::{
+    fmt,
+    hash::Hash,
+    mem,
+    ops::{Deref, DerefMut, Index, IndexMut},
+};
 
-use crate::{engine::Engine, prune::PruneList};
+use indexmap::IndexSet;
+
+use crate::engine::Engine;
 
 /// A program for the VM
 #[derive(derivative::Derivative)]
@@ -147,12 +152,10 @@ impl<E: Engine> Program<E> {
         let mut curr = ThreadList::new(states.len());
         let mut next = ThreadList::new(states.len());
 
-        let mut prune_list = PruneList::new(self.prog.len());
-
         // start initial thread at start instruction
         let first_tok = input.peek().map(|(_i, tok)| tok);
         for state in states.drain(..) {
-            curr.add_thread(0, 0, first_tok, self, &mut prune_list, state);
+            curr.add_thread(0, 0, first_tok, self, state);
         }
 
         let matches = states;
@@ -171,7 +174,6 @@ impl<E: Engine> Program<E> {
                                     i + 1,
                                     input.peek().map(|(_i, tok)| tok),
                                     self,
-                                    &mut prune_list,
                                     th.engine,
                                 );
                             }
@@ -183,25 +185,19 @@ impl<E: Engine> Program<E> {
                                     i + 1,
                                     input.peek().map(|(_i, tok)| tok),
                                     self,
-                                    &mut prune_list,
                                     th.engine,
                                 );
                             }
                         }
                         // add the saved locations to the final list
                         Instr::Match => next.add_match(th.engine),
-                        // These instructions are handled in add_thread, so the current thread should
-                        // never point to one of them
-                        Instr::Split(_)
-                        | Instr::JSplit(_)
-                        | Instr::Jump(_)
-                        | Instr::Peek(_)
-                        | Instr::Reject => {
-                            unreachable!();
-                        }
+                        // These instructions have been handled in add_thread, so we skip them here
+                        Instr::Split(_) | Instr::JSplit(_) | Instr::Jump(_) | Instr::Peek(_) => {}
+                        // This match is dead, do not propagate it
+                        Instr::Reject => {}
                     }
                 } else {
-                    next.threads.push(th)
+                    next.threads.insert(th);
                 }
             }
             // `next` becomes list of active threads, and `curr` (empty after iteration) can hold
@@ -401,7 +397,7 @@ pub enum Instr<E: Engine> {
 
 /// A thread, consisting of an `InstrPtr` to the current instruction, and a vector of all saved
 /// positions
-#[derive(Debug)]
+#[derive(Debug, Eq, Hash, PartialEq)]
 struct Thread<E> {
     /// Pointer to current instruction, or `None` if the thread is complete
     pc: Option<InstrPtr>,
@@ -427,14 +423,14 @@ impl<E> Thread<E> {
 /// A list of threads
 #[derive(Debug)]
 struct ThreadList<E> {
-    threads: Vec<Thread<E>>,
+    threads: IndexSet<Thread<E>>,
 }
 
-impl<E> ThreadList<E> {
+impl<E: Hash + Eq> ThreadList<E> {
     /// Create a new `ThreadList` with a specified capacity
     fn new(cap: usize) -> Self {
         ThreadList {
-            threads: Vec::with_capacity(cap),
+            threads: IndexSet::with_capacity(cap),
         }
     }
 
@@ -448,13 +444,12 @@ impl<E> ThreadList<E> {
         in_idx: usize,
         next_tok: Option<&E::Token>,
         prog: &Program<E>,
-        prune_list: &mut PruneList,
         mut engine: E,
     ) where
         E: Engine,
     {
         // prune this thread if necessary
-        if prune_list.insert(pc, &engine, in_idx) {
+        if !self.threads.insert(Thread::new(pc, engine.clone())) {
             return;
         }
 
@@ -463,44 +458,41 @@ impl<E> ThreadList<E> {
                 // call `add_thread` recursively
                 // branch with no jump is higher priority
                 // clone the `engine` so we can use it again in the second branch
-                self.add_thread(pc + 1, in_idx, next_tok, prog, prune_list, engine.clone());
-                self.add_thread(split, in_idx, next_tok, prog, prune_list, engine);
+                self.add_thread(pc + 1, in_idx, next_tok, prog, engine.clone());
+                self.add_thread(split, in_idx, next_tok, prog, engine);
             }
             Instr::JSplit(split) => {
                 // call `add_thread` recursively
                 // branch with jump is higher priority
                 // clone the `engine` so we can use it again in the second branch
-                self.add_thread(split, in_idx, next_tok, prog, prune_list, engine.clone());
-                self.add_thread(pc + 1, in_idx, next_tok, prog, prune_list, engine);
+                self.add_thread(split, in_idx, next_tok, prog, engine.clone());
+                self.add_thread(pc + 1, in_idx, next_tok, prog, engine);
             }
             Instr::Jump(jump) => {
                 // call `add_thread` recursively
                 // jump to specified pc
-                self.add_thread(jump, in_idx, next_tok, prog, prune_list, engine);
+                self.add_thread(jump, in_idx, next_tok, prog, engine);
             }
             Instr::Peek(ref args) => {
                 // check if the engine matches here
                 if engine.peek(args, in_idx, next_tok) {
                     // and recursively add next instruction
-                    self.add_thread(pc + 1, in_idx, next_tok, prog, prune_list, engine);
+                    self.add_thread(pc + 1, in_idx, next_tok, prog, engine);
                 }
             }
-            Instr::Reject => {} // do nothing, this thread is dead
-            Instr::Any | Instr::Consume(_) | Instr::Match => {
-                // push a new thread with the given pc
-                self.threads.push(Thread::new(pc, engine));
-            }
+            // These do not add any new threads
+            Instr::Reject | Instr::Any | Instr::Consume(_) | Instr::Match => {}
         }
     }
 
     fn add_match(&mut self, engine: E) {
-        self.threads.push(Thread::new_match(engine))
+        self.threads.insert(Thread::new_match(engine));
     }
 }
 
 impl<'a, E> IntoIterator for &'a mut ThreadList<E> {
     type Item = Thread<E>;
-    type IntoIter = ::std::vec::Drain<'a, Thread<E>>;
+    type IntoIter = ::indexmap::set::Drain<'a, Thread<E>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.threads.drain(..)

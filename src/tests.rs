@@ -1,6 +1,6 @@
 use crate::{engine, program, Program};
 
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Engine {
     saves: Vec<Option<usize>>,
     is_whitespace: bool,
@@ -27,9 +27,7 @@ impl engine::Engine for Engine {
 
     fn peek(&mut self, args: &Self::Peek, index: usize, token: Option<&Self::Token>) -> bool {
         match args {
-            Peek::WordBoundary => {
-                token.map_or(true, |tok| tok.is_whitespace() ^ self.is_whitespace)
-            }
+            Peek::WordBoundary => token.is_none_or(|tok| tok.is_whitespace() ^ self.is_whitespace),
             Peek::Save(slot) => {
                 self.saves[*slot] = Some(index);
                 true
@@ -118,4 +116,27 @@ fn precedence_of_alternates() {
         saves.iter().map(|engine| &engine.saves).collect::<Vec<_>>(),
         &[&[Some(0), Some(2)], &[Some(1), Some(2)]],
     );
+}
+
+#[test]
+fn pruning() {
+    use self::program::Instr;
+    let mut program = Program::new();
+    program.extend([
+        /*  0 */ Instr::Split(6),
+        /*  1 */ Instr::Split(4),
+        /*  2 */ Instr::Peek(Peek::Save(0)),
+        /*  3 */ Instr::Jump(10),
+        /*  4 */ Instr::Peek(Peek::Save(1)),
+        /*  5 */ Instr::Jump(10),
+        /*  6 */ Instr::Split(9),
+        /*  7 */ Instr::Peek(Peek::Save(0)),
+        /*  8 */ Instr::Jump(10),
+        /*  9 */ Instr::Peek(Peek::Save(1)),
+        /* 10 */ Instr::Any,
+    ]);
+    println!("{program}");
+    let states = program.exec(Engine::new(2), "ab".chars());
+
+    assert_eq!(states.len(), 2);
 }

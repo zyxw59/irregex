@@ -9,3 +9,4 @@ license = "MIT"
 
 [dependencies]
 derivative = "2.2.0"
+indexmap = "2.12.1"
