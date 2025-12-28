@@ -211,7 +211,7 @@ impl<E: Engine> Program<E> {
 
         // now iterate over remaining threads, to check for matches
         for th in &mut curr {
-            if let Instr::Match = th.pc.map(|pc| &self[pc]).unwrap_or(&Instr::Match) {
+            if th.pc.is_none_or(|pc| matches!(self[pc], Instr::Match)) {
                 matches.push(th.engine);
             }
             // anything else is a failed match
