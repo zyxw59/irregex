@@ -140,3 +140,24 @@ fn pruning() {
 
     assert_eq!(states.len(), 2);
 }
+
+#[test]
+fn rejection() {
+    use self::program::Instr;
+    let mut program = Program::new();
+    program.extend([
+        /* 0 */ Instr::Split(3),
+        /* 1 */ Instr::Peek(Peek::Save(0)),
+        /* 2 */ Instr::Reject,
+        /* 3 */ Instr::Peek(Peek::Save(1)),
+    ]);
+    println!("{program}");
+    let states = program.exec(Engine::new(2), "ab".chars());
+    assert_eq!(
+        states
+            .iter()
+            .map(|engine| &engine.saves)
+            .collect::<Vec<_>>(),
+        [&[None, Some(0)]],
+    );
+}
