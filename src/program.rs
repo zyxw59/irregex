@@ -164,41 +164,8 @@ impl<E: Engine> Program<E> {
         while let Some((i, tok_i)) = input.next() {
             // iterate over active threads, draining the list so we can reuse it without
             // reallocating
-            for mut th in &mut curr {
-                if let Some(pc) = th.pc {
-                    match &self[pc] {
-                        Instr::Any => {
-                            if th.engine.any(i, &tok_i) {
-                                next.add_thread(
-                                    pc + 1,
-                                    i + 1,
-                                    input.peek().map(|(_i, tok)| tok),
-                                    self,
-                                    th.engine,
-                                );
-                            }
-                        }
-                        Instr::Consume(args) => {
-                            if th.engine.consume(args, i, &tok_i) {
-                                next.add_thread(
-                                    pc + 1,
-                                    i + 1,
-                                    input.peek().map(|(_i, tok)| tok),
-                                    self,
-                                    th.engine,
-                                );
-                            }
-                        }
-                        // add the saved locations to the final list
-                        Instr::Match => next.add_match(th.engine),
-                        // These instructions have been handled in add_thread, so we skip them here
-                        Instr::Split(_) | Instr::JSplit(_) | Instr::Jump(_) | Instr::Peek(_) => {}
-                        // This match is dead, do not propagate it
-                        Instr::Reject => {}
-                    }
-                } else {
-                    next.threads.insert(th);
-                }
+            for th in &mut curr {
+                self.consume_one(i, &tok_i, input.peek().map(|(_i, tok)| tok), th, &mut next);
             }
             // `next` becomes list of active threads, and `curr` (empty after iteration) can hold
             // the next iteration
@@ -211,6 +178,38 @@ impl<E: Engine> Program<E> {
                 matches.push(th.engine);
             }
             // anything else is a failed match
+        }
+    }
+
+    fn consume_one(
+        &self,
+        i: usize,
+        tok_i: &E::Token,
+        next_tok: Option<&E::Token>,
+        mut th: Thread<E>,
+        next: &mut ThreadList<E>,
+    ) {
+        if let Some(pc) = th.pc {
+            match &self[pc] {
+                Instr::Any => {
+                    if th.engine.any(i, tok_i) {
+                        next.add_thread(pc + 1, i + 1, next_tok, self, th.engine);
+                    }
+                }
+                Instr::Consume(args) => {
+                    if th.engine.consume(args, i, tok_i) {
+                        next.add_thread(pc + 1, i + 1, next_tok, self, th.engine);
+                    }
+                }
+                // add the saved locations to the final list
+                Instr::Match => next.add_match(th.engine),
+                // These instructions have been handled in add_thread, so we skip them here
+                Instr::Split(_) | Instr::JSplit(_) | Instr::Jump(_) | Instr::Peek(_) => {}
+                // This match is dead, do not propagate it
+                Instr::Reject => {}
+            }
+        } else {
+            next.threads.insert(th);
         }
     }
 }
