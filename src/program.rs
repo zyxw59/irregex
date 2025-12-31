@@ -315,7 +315,7 @@ impl<'p, E: Engine> EvaluationState<'p, E> {
     }
 
     pub fn step(&mut self, index: usize, token: &E::Token, next: Option<&E::Token>) {
-        for thread in &mut self.current_threads {
+        for thread in &mut self.current_threads.drain() {
             self.next_threads
                 .consume_one(index, token, next, self.program, thread);
         }
@@ -324,7 +324,7 @@ impl<'p, E: Engine> EvaluationState<'p, E> {
         mem::swap(&mut self.current_threads, &mut self.next_threads);
     }
 
-    pub fn finish(&mut self) -> impl Iterator<Item = E> + use<'_, 'p, E> {
+    pub fn finish(self) -> impl Iterator<Item = E> + use<'p, E> {
         // now iterate over remaining threads, to check for matches
         self.current_threads.into_iter().filter_map(|th| {
             th.pc
@@ -429,6 +429,10 @@ impl<E: Hash + Eq> ThreadList<E> {
         }
     }
 
+    fn drain(&mut self) -> impl Iterator<Item = Thread<E>> + use<'_, E> {
+        self.threads.drain(..)
+    }
+
     fn consume_one(
         &mut self,
         i: usize,
@@ -519,11 +523,11 @@ impl<E: Hash + Eq> ThreadList<E> {
     }
 }
 
-impl<'a, E> IntoIterator for &'a mut ThreadList<E> {
+impl<E> IntoIterator for ThreadList<E> {
     type Item = Thread<E>;
-    type IntoIter = ::indexmap::set::Drain<'a, Thread<E>>;
+    type IntoIter = ::indexmap::set::IntoIter<Thread<E>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.threads.drain(..)
+        self.threads.into_iter()
     }
 }
