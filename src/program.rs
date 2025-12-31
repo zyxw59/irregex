@@ -149,68 +149,18 @@ impl<E: Engine> Program<E> {
     {
         let mut input = input.into_iter().enumerate().peekable();
 
-        let mut curr = ThreadList::new(states.len());
-        let mut next = ThreadList::new(states.len());
-
         // start initial thread at start instruction
         let first_tok = input.peek().map(|(_i, tok)| tok);
-        for state in states.drain(..) {
-            curr.add_thread(0, 0, first_tok, self, state);
-        }
-
-        let matches = states;
+        let mut executor = EvaluationState::new(self, states.drain(..), first_tok);
 
         // iterate over tokens of input string
         while let Some((i, tok_i)) = input.next() {
             // iterate over active threads, draining the list so we can reuse it without
             // reallocating
-            for th in &mut curr {
-                self.consume_one(i, &tok_i, input.peek().map(|(_i, tok)| tok), th, &mut next);
-            }
-            // `next` becomes list of active threads, and `curr` (empty after iteration) can hold
-            // the next iteration
-            mem::swap(&mut curr, &mut next);
+            executor.step(i, &tok_i, input.peek().map(|(_i, tok)| tok));
         }
 
-        // now iterate over remaining threads, to check for matches
-        for th in &mut curr {
-            if th.pc.is_none_or(|pc| matches!(self[pc], Instr::Match)) {
-                matches.push(th.engine);
-            }
-            // anything else is a failed match
-        }
-    }
-
-    fn consume_one(
-        &self,
-        i: usize,
-        tok_i: &E::Token,
-        next_tok: Option<&E::Token>,
-        mut th: Thread<E>,
-        next: &mut ThreadList<E>,
-    ) {
-        if let Some(pc) = th.pc {
-            match &self[pc] {
-                Instr::Any => {
-                    if th.engine.any(i, tok_i) {
-                        next.add_thread(pc + 1, i + 1, next_tok, self, th.engine);
-                    }
-                }
-                Instr::Consume(args) => {
-                    if th.engine.consume(args, i, tok_i) {
-                        next.add_thread(pc + 1, i + 1, next_tok, self, th.engine);
-                    }
-                }
-                // add the saved locations to the final list
-                Instr::Match => next.add_match(th.engine),
-                // These instructions have been handled in add_thread, so we skip them here
-                Instr::Split(_) | Instr::JSplit(_) | Instr::Jump(_) | Instr::Peek(_) => {}
-                // This match is dead, do not propagate it
-                Instr::Reject => {}
-            }
-        } else {
-            next.threads.insert(th);
-        }
+        states.extend(executor.finish())
     }
 }
 
@@ -338,6 +288,52 @@ impl<E: Engine> Alternates<'_, E> {
     }
 }
 
+pub struct EvaluationState<'p, E: Engine> {
+    program: &'p Program<E>,
+    current_threads: ThreadList<E>,
+    next_threads: ThreadList<E>,
+}
+
+impl<'p, E: Engine> EvaluationState<'p, E> {
+    pub fn new(
+        program: &'p Program<E>,
+        initial_states: impl IntoIterator<Item = E>,
+        first_tok: Option<&E::Token>,
+    ) -> Self {
+        let initial_states = initial_states.into_iter();
+        let num_states = initial_states.size_hint().0;
+        let mut current_threads = ThreadList::new(num_states);
+        let next_threads = ThreadList::new(num_states);
+        for state in initial_states {
+            current_threads.add_thread(0, 0, first_tok, program, state);
+        }
+        Self {
+            program,
+            current_threads,
+            next_threads,
+        }
+    }
+
+    pub fn step(&mut self, index: usize, token: &E::Token, next: Option<&E::Token>) {
+        for thread in &mut self.current_threads {
+            self.next_threads
+                .consume_one(index, token, next, self.program, thread);
+        }
+        // `next_threads` becomes list of active threads, and `current_threads` (empty after
+        // iteration) can hold the next iteration
+        mem::swap(&mut self.current_threads, &mut self.next_threads);
+    }
+
+    pub fn finish(&mut self) -> impl Iterator<Item = E> + use<'_, 'p, E> {
+        // now iterate over remaining threads, to check for matches
+        self.current_threads.into_iter().filter_map(|th| {
+            th.pc
+                .is_none_or(|pc| matches!(self.program[pc], Instr::Match))
+                .then_some(th.engine)
+        })
+    }
+}
+
 pub trait Pattern<E: Engine> {
     type Error;
 
@@ -430,6 +426,40 @@ impl<E: Hash + Eq> ThreadList<E> {
     fn new(cap: usize) -> Self {
         ThreadList {
             threads: IndexSet::with_capacity(cap),
+        }
+    }
+
+    fn consume_one(
+        &mut self,
+        i: usize,
+        tok_i: &E::Token,
+        next_tok: Option<&E::Token>,
+        prog: &Program<E>,
+        mut th: Thread<E>,
+    ) where
+        E: Engine,
+    {
+        if let Some(pc) = th.pc {
+            match &prog[pc] {
+                Instr::Any => {
+                    if th.engine.any(i, tok_i) {
+                        self.add_thread(pc + 1, i + 1, next_tok, prog, th.engine);
+                    }
+                }
+                Instr::Consume(args) => {
+                    if th.engine.consume(args, i, tok_i) {
+                        self.add_thread(pc + 1, i + 1, next_tok, prog, th.engine);
+                    }
+                }
+                // add the saved locations to the final list
+                Instr::Match => self.add_match(th.engine),
+                // These instructions have been handled in add_thread, so we skip them here
+                Instr::Split(_) | Instr::JSplit(_) | Instr::Jump(_) | Instr::Peek(_) => {}
+                // This match is dead, do not propagate it
+                Instr::Reject => {}
+            }
+        } else {
+            self.threads.insert(th);
         }
     }
 
