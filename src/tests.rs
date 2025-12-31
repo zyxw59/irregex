@@ -1,4 +1,4 @@
-use crate::{engine, program, Program};
+use crate::{Program, engine, program};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Engine {

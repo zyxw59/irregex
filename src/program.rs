@@ -392,7 +392,7 @@ pub enum Instr<E: Engine> {
 
 /// A thread, consisting of an `InstrPtr` to the current instruction, and a vector of all saved
 /// positions
-#[derive(Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Thread<E> {
     /// Pointer to current instruction, or `None` if the thread is complete
     pc: Option<InstrPtr>,
@@ -409,6 +409,22 @@ impl<E> Thread<E> {
         }
     }
 
+    /// Create a new `Thread` by advancing the instruction pointer
+    fn next(self) -> Self {
+        Self {
+            pc: self.pc.map(|pc| pc + 1),
+            ..self
+        }
+    }
+
+    /// Create a new `Thread` by advancing the instruction pointer to the specified position
+    fn with_pc(self, pc: InstrPtr) -> Self {
+        Self {
+            pc: Some(pc),
+            ..self
+        }
+    }
+
     /// Create a new `Thread` with the given state and no instruction pointer.
     fn new_match(engine: E) -> Self {
         Thread { pc: None, engine }
@@ -419,6 +435,8 @@ impl<E> Thread<E> {
 #[derive(Debug)]
 struct ThreadList<E> {
     threads: IndexSet<Thread<E>>,
+    next: IndexSet<Thread<E>>,
+    matches: IndexSet<E>,
 }
 
 impl<E: Hash + Eq> ThreadList<E> {
@@ -426,11 +444,70 @@ impl<E: Hash + Eq> ThreadList<E> {
     fn new(cap: usize) -> Self {
         ThreadList {
             threads: IndexSet::with_capacity(cap),
+            next: IndexSet::with_capacity(cap),
+            matches: IndexSet::new(),
         }
     }
 
     fn drain(&mut self) -> impl Iterator<Item = Thread<E>> + use<'_, E> {
         self.threads.drain(..)
+    }
+
+    fn consume_(&mut self, i: usize, token: Option<&E::Token>, prog: &Program<E>, mut th: Thread<E>)
+    where
+        E: Engine,
+    {
+        // prune this thread if necessary
+        if !self.threads.insert(th.clone()) {
+            return;
+        }
+
+        if let Some(pc) = th.pc {
+            match prog[pc] {
+                Instr::Split(split) => {
+                    // branch with no jump is higher priority
+                    self.consume_(i, token, prog, th.clone().next());
+                    self.consume_(i, token, prog, th.with_pc(split));
+                }
+                Instr::JSplit(split) => {
+                    // branch with jump is higher priority
+                    self.consume_(i, token, prog, th.clone().with_pc(split));
+                    self.consume_(i, token, prog, th.next());
+                }
+                Instr::Jump(jump) => {
+                    // jump to specified pc
+                    self.consume_(i, token, prog, th.with_pc(jump));
+                }
+                Instr::Peek(ref args) => {
+                    // check if the engine matches here
+                    if th.engine.peek(args, i, token) {
+                        // and recursively add next instruction
+                        self.consume_(i, token, prog, th.next());
+                    }
+                }
+                Instr::Any => {
+                    if let Some(token) = token
+                        && th.engine.any(i, token)
+                    {
+                        self.next.insert(th.next());
+                    }
+                }
+                Instr::Consume(ref args) => {
+                    if let Some(token) = token
+                        && th.engine.consume(args, i, token)
+                    {
+                        self.next.insert(th.next());
+                    }
+                }
+                Instr::Match => {
+                    self.matches.insert(th.engine);
+                }
+                // Reject match
+                Instr::Reject => {}
+            }
+        } else {
+            self.matches.insert(th.engine);
+        }
     }
 
     fn consume_one(
