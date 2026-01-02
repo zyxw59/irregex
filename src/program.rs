@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fmt,
     hash::Hash,
     ops::{Deref, DerefMut, Index, IndexMut},
@@ -163,7 +163,7 @@ impl<E: Engine> Program<E> {
             executor.step(i, tok_i.as_ref());
         }
 
-        states.extend(executor.finish())
+        states.extend(executor.into_matches())
     }
 }
 
@@ -306,13 +306,17 @@ impl<'p, E: Engine> EvaluationState<'p, E> {
 
     pub fn step(&mut self, index: usize, token: Option<&E::Token>) {
         while let Some(thread) = self.threads.pop() {
-            self.threads.consume_(index, token, self.program, thread);
+            self.threads.step_thread(index, token, self.program, thread);
         }
         self.threads.reset();
     }
 
-    pub fn finish(self) -> impl Iterator<Item = E> + use<'p, E> {
+    pub fn into_matches(self) -> impl Iterator<Item = E> + use<'p, E> {
         self.threads.matches.into_iter()
+    }
+
+    pub fn matches(&self) -> impl Iterator<Item = &E> + use<'_, 'p, E> {
+        self.threads.matches.iter()
     }
 }
 
@@ -400,22 +404,23 @@ impl<E> Thread<E> {
 /// A list of threads
 #[derive(Debug)]
 struct ThreadList<E> {
-    threads: IndexSet<Thread<E>>,
-    current: VecDeque<Thread<E>>,
+    seen: HashSet<Thread<E>>,
+    threads: VecDeque<Thread<E>>,
     count: usize,
     matches: IndexSet<E>,
 }
 
 impl<E: Hash + Eq> ThreadList<E> {
     fn new(states: impl IntoIterator<Item = E>) -> Self {
-        let current: VecDeque<_> = states
+        let threads: VecDeque<_> = states
             .into_iter()
             .map(|engine| Thread { pc: 0, engine })
             .collect();
+        let count = threads.len();
         ThreadList {
-            threads: IndexSet::new(),
-            count: current.len(),
-            current,
+            seen: HashSet::with_capacity(count),
+            threads,
+            count,
             matches: IndexSet::new(),
         }
     }
@@ -423,60 +428,65 @@ impl<E: Hash + Eq> ThreadList<E> {
     fn pop(&mut self) -> Option<Thread<E>> {
         if self.count > 0 {
             self.count -= 1;
-            self.current.pop_front()
+            self.threads.pop_front()
         } else {
             None
         }
     }
 
     fn reset(&mut self) {
-        self.threads.clear();
-        self.count = self.current.len();
+        self.seen.clear();
+        self.count = self.threads.len();
     }
 
-    fn consume_(&mut self, i: usize, token: Option<&E::Token>, prog: &Program<E>, mut th: Thread<E>)
-    where
+    fn step_thread(
+        &mut self,
+        i: usize,
+        token: Option<&E::Token>,
+        prog: &Program<E>,
+        mut th: Thread<E>,
+    ) where
         E: Engine,
     {
         // prune this thread if necessary
-        if !self.threads.insert(th.clone()) {
+        if !self.seen.insert(th.clone()) {
             return;
         }
 
         match prog[th.pc] {
             Instr::Split(split) => {
                 // branch with no jump is higher priority
-                self.consume_(i, token, prog, th.clone().next());
-                self.consume_(i, token, prog, th.with_pc(split));
+                self.step_thread(i, token, prog, th.clone().next());
+                self.step_thread(i, token, prog, th.with_pc(split));
             }
             Instr::JSplit(split) => {
                 // branch with jump is higher priority
-                self.consume_(i, token, prog, th.clone().with_pc(split));
-                self.consume_(i, token, prog, th.next());
+                self.step_thread(i, token, prog, th.clone().with_pc(split));
+                self.step_thread(i, token, prog, th.next());
             }
             Instr::Jump(jump) => {
                 // jump to specified pc
-                self.consume_(i, token, prog, th.with_pc(jump));
+                self.step_thread(i, token, prog, th.with_pc(jump));
             }
             Instr::Peek(ref args) => {
                 // check if the engine matches here
                 if th.engine.peek(args, i, token) {
                     // and recursively add next instruction
-                    self.consume_(i, token, prog, th.next());
+                    self.step_thread(i, token, prog, th.next());
                 }
             }
             Instr::Any => {
                 if let Some(token) = token
                     && th.engine.any(i, token)
                 {
-                    self.current.push_back(th.next());
+                    self.threads.push_back(th.next());
                 }
             }
             Instr::Consume(ref args) => {
                 if let Some(token) = token
                     && th.engine.consume(args, i, token)
                 {
-                    self.current.push_back(th.next());
+                    self.threads.push_back(th.next());
                 }
             }
             Instr::Match => {
@@ -485,14 +495,5 @@ impl<E: Hash + Eq> ThreadList<E> {
             // Reject match
             Instr::Reject => {}
         }
-    }
-}
-
-impl<E> IntoIterator for ThreadList<E> {
-    type Item = Thread<E>;
-    type IntoIter = ::indexmap::set::IntoIter<Thread<E>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.threads.into_iter()
     }
 }
