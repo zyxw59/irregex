@@ -154,7 +154,7 @@ impl<E: Engine> Program<E> {
             .enumerate();
 
         // start initial threads at start instruction
-        let mut executor = EvaluationState::new(self, states.drain(..));
+        let mut executor = ThreadList::new(self, states.drain(..));
 
         // iterate over tokens of input string
         for (i, tok_i) in input {
@@ -291,35 +291,6 @@ impl<E: Engine> Alternates<'_, E> {
     }
 }
 
-pub struct EvaluationState<'p, E: Engine> {
-    program: &'p Program<E>,
-    threads: ThreadList<E>,
-}
-
-impl<'p, E: Engine> EvaluationState<'p, E> {
-    pub fn new(program: &'p Program<E>, initial_states: impl IntoIterator<Item = E>) -> Self {
-        Self {
-            program,
-            threads: ThreadList::new(initial_states),
-        }
-    }
-
-    pub fn step(&mut self, index: usize, token: Option<&E::Token>) {
-        while let Some(thread) = self.threads.pop() {
-            self.threads.step_thread(index, token, self.program, thread);
-        }
-        self.threads.reset();
-    }
-
-    pub fn into_matches(self) -> impl Iterator<Item = E> + use<'p, E> {
-        self.threads.matches.into_iter()
-    }
-
-    pub fn matches(&self) -> impl Iterator<Item = &E> + use<'_, 'p, E> {
-        self.threads.matches.iter()
-    }
-}
-
 pub trait Pattern<E: Engine> {
     type Error;
 
@@ -402,27 +373,45 @@ impl<E> Thread<E> {
 }
 
 /// A list of threads
-#[derive(Debug)]
-struct ThreadList<E> {
+#[derive(derivative::Derivative)]
+#[derivative(Debug(bound = "E: fmt::Debug, E::Consume: fmt::Debug, E::Peek: fmt::Debug"))]
+pub struct ThreadList<'p, E: Engine> {
+    program: &'p Program<E>,
     seen: HashSet<Thread<E>>,
     threads: VecDeque<Thread<E>>,
     count: usize,
     matches: IndexSet<E>,
 }
 
-impl<E: Hash + Eq> ThreadList<E> {
-    fn new(states: impl IntoIterator<Item = E>) -> Self {
+impl<'p, E: Engine> ThreadList<'p, E> {
+    pub fn new(program: &'p Program<E>, states: impl IntoIterator<Item = E>) -> Self {
         let threads: VecDeque<_> = states
             .into_iter()
             .map(|engine| Thread { pc: 0, engine })
             .collect();
         let count = threads.len();
         ThreadList {
+            program,
             seen: HashSet::with_capacity(count),
             threads,
             count,
             matches: IndexSet::new(),
         }
+    }
+
+    pub fn step(&mut self, index: usize, token: Option<&E::Token>) {
+        while let Some(thread) = self.pop() {
+            self.step_thread(index, token, self.program, thread);
+        }
+        self.reset();
+    }
+
+    pub fn into_matches(self) -> impl Iterator<Item = E> + use<'p, E> {
+        self.matches.into_iter()
+    }
+
+    pub fn matches(&self) -> impl Iterator<Item = &E> + use<'_, 'p, E> {
+        self.matches.iter()
     }
 
     fn pop(&mut self) -> Option<Thread<E>> {
