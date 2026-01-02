@@ -1,4 +1,7 @@
-use crate::{Program, engine, program};
+use crate::{
+    Program, engine,
+    program::{Instr, IrregexInput, ThreadList},
+};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Engine {
@@ -52,7 +55,6 @@ pub enum Peek {
 
 #[test]
 fn program() {
-    use self::program::Instr;
     // /(ab?)(b?c)\b/
     let mut program = Program::floating_start();
     // save start of match
@@ -101,7 +103,6 @@ fn program() {
 
 #[test]
 fn precedence_of_alternates() {
-    use self::program::Instr;
     // /ab|b/
     let mut program = Program::floating_start();
     program.peek(Peek::Save(0));
@@ -123,7 +124,6 @@ fn precedence_of_alternates() {
 
 #[test]
 fn pruning() {
-    use self::program::Instr;
     let mut program = Program::new();
     program.extend([
         /*  0 */ Instr::Split(6),
@@ -146,7 +146,6 @@ fn pruning() {
 
 #[test]
 fn rejection() {
-    use self::program::Instr;
     let mut program = Program::new();
     program.extend([
         /* 0 */ Instr::Split(3),
@@ -162,5 +161,73 @@ fn rejection() {
             .map(|engine| &engine.saves)
             .collect::<Vec<_>>(),
         [&[None, Some(0)]],
+    );
+}
+
+#[test]
+fn short_circuit() {
+    // /^(ab?)(b?c)\b/
+    let mut program = Program::new();
+    // save start of match
+    program.peek(Peek::Save(0));
+    // save start of first subgroup
+    program.peek(Peek::Save(2));
+    // a
+    program.consume('a');
+    // b?
+    program.zero_or_one(Instr::Consume('b'), true).unwrap();
+    // save end of first subgroup
+    program.peek(Peek::Save(3));
+    // save start of second subgroup
+    program.peek(Peek::Save(4));
+    // b?
+    program.zero_or_one(Instr::Consume('b'), true).unwrap();
+    // c
+    program.consume('c');
+    // save end of second subgroup
+    program.peek(Peek::Save(5));
+    // word boundary
+    program.peek(Peek::WordBoundary);
+    // save end of match
+    program.peek(Peek::Save(1));
+
+    println!("{program}");
+    let mut input = "abc abbcd abbc".chars();
+    let mut input = input.irregex_input();
+
+    fn match_one(
+        mut input: impl Iterator<Item = (usize, Option<char>)>,
+        program: &Program<Engine>,
+    ) -> Option<Engine> {
+        input
+            .try_fold(
+                ThreadList::new(program, [Engine::new(6)]),
+                |mut threads, (idx, token)| {
+                    use std::ops::ControlFlow;
+                    threads.step(idx, token.as_ref());
+                    if threads.num_matches() > 0 {
+                        ControlFlow::Break(threads.into_matches().next())
+                    } else if threads.num_live_threads() == 0 {
+                        ControlFlow::Break(None)
+                    } else {
+                        ControlFlow::Continue(threads)
+                    }
+                },
+            )
+            .break_value()
+            .flatten()
+    }
+
+    assert_eq!(
+        match_one(&mut input, &program).unwrap().saves,
+        [Some(0), Some(3), Some(0), Some(2), Some(2), Some(3)],
+    );
+
+    assert!(match_one(&mut input, &program).is_none());
+    assert_eq!(input.next(), Some((9, Some(' '))));
+
+    assert_eq!(
+        match_one(&mut input, &program).unwrap().saves,
+        [Some(10), Some(14), Some(10), Some(12), Some(12), Some(14)],
     );
 }

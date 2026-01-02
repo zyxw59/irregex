@@ -372,6 +372,14 @@ impl<E> Thread<E> {
     }
 }
 
+pub trait IrregexInput: Iterator + Sized {
+    fn irregex_input(&mut self) -> impl Iterator<Item = (usize, Option<Self::Item>)> {
+        self.map(Some).chain(std::iter::once(None)).enumerate()
+    }
+}
+
+impl<I> IrregexInput for I where I: Iterator {}
+
 /// A list of threads
 #[derive(derivative::Derivative)]
 #[derivative(Debug(bound = "E: fmt::Debug, E::Consume: fmt::Debug, E::Peek: fmt::Debug"))]
@@ -404,6 +412,14 @@ impl<'p, E: Engine> ThreadList<'p, E> {
             self.step_thread(index, token, self.program, thread);
         }
         self.reset();
+    }
+
+    pub fn num_matches(&self) -> usize {
+        self.matches.len()
+    }
+
+    pub fn num_live_threads(&self) -> usize {
+        self.count
     }
 
     pub fn into_matches(self) -> impl Iterator<Item = E> + use<'p, E> {
