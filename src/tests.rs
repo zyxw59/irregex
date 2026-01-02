@@ -20,12 +20,14 @@ impl engine::Engine for Engine {
     type Consume = char;
     type Peek = Peek;
 
-    fn consume(&mut self, expected: &Self::Consume, _index: usize, token: &Self::Token) -> bool {
+    fn consume(&mut self, expected: &Self::Consume, index: usize, token: &Self::Token) -> bool {
+        eprintln!("{self:?}.consume({expected:?}, {index}, {token:?})");
         self.is_whitespace = token.is_whitespace();
         expected == token
     }
 
     fn peek(&mut self, args: &Self::Peek, index: usize, token: Option<&Self::Token>) -> bool {
+        eprintln!("{self:?}.peek({args:?}, {index}, {token:?})");
         match args {
             Peek::WordBoundary => token.is_none_or(|tok| tok.is_whitespace() ^ self.is_whitespace),
             Peek::Save(slot) => {
@@ -35,7 +37,8 @@ impl engine::Engine for Engine {
         }
     }
 
-    fn any(&mut self, _index: usize, token: &Self::Token) -> bool {
+    fn any(&mut self, index: usize, token: &Self::Token) -> bool {
+        eprintln!("{self:?}.any({index}, {token:?})");
         self.is_whitespace = token.is_whitespace();
         true
     }
