@@ -1,7 +1,7 @@
 use std::{
+    collections::VecDeque,
     fmt,
     hash::Hash,
-    mem,
     ops::{Deref, DerefMut, Index, IndexMut},
 };
 
@@ -147,17 +147,20 @@ impl<E: Engine> Program<E> {
     where
         I: IntoIterator<Item = E::Token>,
     {
-        let mut input = input.into_iter().enumerate().peekable();
+        let input = input
+            .into_iter()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .enumerate();
 
-        // start initial thread at start instruction
-        let first_tok = input.peek().map(|(_i, tok)| tok);
-        let mut executor = EvaluationState::new(self, states.drain(..), first_tok);
+        // start initial threads at start instruction
+        let mut executor = EvaluationState::new(self, states.drain(..));
 
         // iterate over tokens of input string
-        while let Some((i, tok_i)) = input.next() {
+        for (i, tok_i) in input {
             // iterate over active threads, draining the list so we can reuse it without
             // reallocating
-            executor.step(i, &tok_i, input.peek().map(|(_i, tok)| tok));
+            executor.step(i, tok_i.as_ref());
         }
 
         states.extend(executor.finish())
@@ -290,47 +293,26 @@ impl<E: Engine> Alternates<'_, E> {
 
 pub struct EvaluationState<'p, E: Engine> {
     program: &'p Program<E>,
-    current_threads: ThreadList<E>,
-    next_threads: ThreadList<E>,
+    threads: ThreadList<E>,
 }
 
 impl<'p, E: Engine> EvaluationState<'p, E> {
-    pub fn new(
-        program: &'p Program<E>,
-        initial_states: impl IntoIterator<Item = E>,
-        first_tok: Option<&E::Token>,
-    ) -> Self {
-        let initial_states = initial_states.into_iter();
-        let num_states = initial_states.size_hint().0;
-        let mut current_threads = ThreadList::new(num_states);
-        let next_threads = ThreadList::new(num_states);
-        for state in initial_states {
-            current_threads.add_thread(0, 0, first_tok, program, state);
-        }
+    pub fn new(program: &'p Program<E>, initial_states: impl IntoIterator<Item = E>) -> Self {
         Self {
             program,
-            current_threads,
-            next_threads,
+            threads: ThreadList::new(initial_states),
         }
     }
 
-    pub fn step(&mut self, index: usize, token: &E::Token, next: Option<&E::Token>) {
-        for thread in &mut self.current_threads.drain() {
-            self.next_threads
-                .consume_one(index, token, next, self.program, thread);
+    pub fn step(&mut self, index: usize, token: Option<&E::Token>) {
+        while let Some(thread) = self.threads.pop() {
+            self.threads.consume_(index, token, self.program, thread);
         }
-        // `next_threads` becomes list of active threads, and `current_threads` (empty after
-        // iteration) can hold the next iteration
-        mem::swap(&mut self.current_threads, &mut self.next_threads);
+        self.threads.reset();
     }
 
     pub fn finish(self) -> impl Iterator<Item = E> + use<'p, E> {
-        // now iterate over remaining threads, to check for matches
-        self.current_threads.into_iter().filter_map(|th| {
-            th.pc
-                .is_none_or(|pc| matches!(self.program[pc], Instr::Match))
-                .then_some(th.engine)
-        })
+        self.threads.matches.into_iter()
     }
 }
 
@@ -395,39 +377,23 @@ pub enum Instr<E: Engine> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Thread<E> {
     /// Pointer to current instruction, or `None` if the thread is complete
-    pc: Option<InstrPtr>,
+    pc: InstrPtr,
     /// Implementation-specific state
     engine: E,
 }
 
 impl<E> Thread<E> {
-    /// Create a new `Thread` with the specified instruction pointer and the given state.
-    fn new(pc: InstrPtr, engine: E) -> Self {
-        Thread {
-            pc: Some(pc),
-            engine,
-        }
-    }
-
     /// Create a new `Thread` by advancing the instruction pointer
     fn next(self) -> Self {
         Self {
-            pc: self.pc.map(|pc| pc + 1),
+            pc: self.pc + 1,
             ..self
         }
     }
 
     /// Create a new `Thread` by advancing the instruction pointer to the specified position
     fn with_pc(self, pc: InstrPtr) -> Self {
-        Self {
-            pc: Some(pc),
-            ..self
-        }
-    }
-
-    /// Create a new `Thread` with the given state and no instruction pointer.
-    fn new_match(engine: E) -> Self {
-        Thread { pc: None, engine }
+        Self { pc, ..self }
     }
 }
 
@@ -435,22 +401,37 @@ impl<E> Thread<E> {
 #[derive(Debug)]
 struct ThreadList<E> {
     threads: IndexSet<Thread<E>>,
-    next: IndexSet<Thread<E>>,
+    current: VecDeque<Thread<E>>,
+    count: usize,
     matches: IndexSet<E>,
 }
 
 impl<E: Hash + Eq> ThreadList<E> {
-    /// Create a new `ThreadList` with a specified capacity
-    fn new(cap: usize) -> Self {
+    fn new(states: impl IntoIterator<Item = E>) -> Self {
+        let current: VecDeque<_> = states
+            .into_iter()
+            .map(|engine| Thread { pc: 0, engine })
+            .collect();
         ThreadList {
-            threads: IndexSet::with_capacity(cap),
-            next: IndexSet::with_capacity(cap),
+            threads: IndexSet::new(),
+            count: current.len(),
+            current,
             matches: IndexSet::new(),
         }
     }
 
-    fn drain(&mut self) -> impl Iterator<Item = Thread<E>> + use<'_, E> {
-        self.threads.drain(..)
+    fn pop(&mut self) -> Option<Thread<E>> {
+        if self.count > 0 {
+            self.count -= 1;
+            self.current.pop_front()
+        } else {
+            None
+        }
+    }
+
+    fn reset(&mut self) {
+        self.threads.clear();
+        self.count = self.current.len();
     }
 
     fn consume_(&mut self, i: usize, token: Option<&E::Token>, prog: &Program<E>, mut th: Thread<E>)
@@ -462,141 +443,48 @@ impl<E: Hash + Eq> ThreadList<E> {
             return;
         }
 
-        if let Some(pc) = th.pc {
-            match prog[pc] {
-                Instr::Split(split) => {
-                    // branch with no jump is higher priority
-                    self.consume_(i, token, prog, th.clone().next());
-                    self.consume_(i, token, prog, th.with_pc(split));
-                }
-                Instr::JSplit(split) => {
-                    // branch with jump is higher priority
-                    self.consume_(i, token, prog, th.clone().with_pc(split));
-                    self.consume_(i, token, prog, th.next());
-                }
-                Instr::Jump(jump) => {
-                    // jump to specified pc
-                    self.consume_(i, token, prog, th.with_pc(jump));
-                }
-                Instr::Peek(ref args) => {
-                    // check if the engine matches here
-                    if th.engine.peek(args, i, token) {
-                        // and recursively add next instruction
-                        self.consume_(i, token, prog, th.next());
-                    }
-                }
-                Instr::Any => {
-                    if let Some(token) = token
-                        && th.engine.any(i, token)
-                    {
-                        self.next.insert(th.next());
-                    }
-                }
-                Instr::Consume(ref args) => {
-                    if let Some(token) = token
-                        && th.engine.consume(args, i, token)
-                    {
-                        self.next.insert(th.next());
-                    }
-                }
-                Instr::Match => {
-                    self.matches.insert(th.engine);
-                }
-                // Reject match
-                Instr::Reject => {}
-            }
-        } else {
-            self.matches.insert(th.engine);
-        }
-    }
-
-    fn consume_one(
-        &mut self,
-        i: usize,
-        tok_i: &E::Token,
-        next_tok: Option<&E::Token>,
-        prog: &Program<E>,
-        mut th: Thread<E>,
-    ) where
-        E: Engine,
-    {
-        if let Some(pc) = th.pc {
-            match &prog[pc] {
-                Instr::Any => {
-                    if th.engine.any(i, tok_i) {
-                        self.add_thread(pc + 1, i + 1, next_tok, prog, th.engine);
-                    }
-                }
-                Instr::Consume(args) => {
-                    if th.engine.consume(args, i, tok_i) {
-                        self.add_thread(pc + 1, i + 1, next_tok, prog, th.engine);
-                    }
-                }
-                // add the saved locations to the final list
-                Instr::Match => self.add_match(th.engine),
-                // These instructions have been handled in add_thread, so we skip them here
-                Instr::Split(_) | Instr::JSplit(_) | Instr::Jump(_) | Instr::Peek(_) => {}
-                // This match is dead, do not propagate it
-                Instr::Reject => {}
-            }
-        } else {
-            self.threads.insert(th);
-        }
-    }
-
-    /// Add a new `Thread` with the specified instruction pointer, and the given list of saved
-    /// locations. If `pc` points to a `Jump`, `Split`, `JSplit`, or `Peek` instruction, calls
-    /// `add_thread` recursively, so that the active `ThreadList` never contains pointers to those
-    /// instructions.
-    fn add_thread(
-        &mut self,
-        pc: InstrPtr,
-        in_idx: usize,
-        next_tok: Option<&E::Token>,
-        prog: &Program<E>,
-        mut engine: E,
-    ) where
-        E: Engine,
-    {
-        // prune this thread if necessary
-        if !self.threads.insert(Thread::new(pc, engine.clone())) {
-            return;
-        }
-
-        match prog[pc] {
+        match prog[th.pc] {
             Instr::Split(split) => {
-                // call `add_thread` recursively
                 // branch with no jump is higher priority
-                // clone the `engine` so we can use it again in the second branch
-                self.add_thread(pc + 1, in_idx, next_tok, prog, engine.clone());
-                self.add_thread(split, in_idx, next_tok, prog, engine);
+                self.consume_(i, token, prog, th.clone().next());
+                self.consume_(i, token, prog, th.with_pc(split));
             }
             Instr::JSplit(split) => {
-                // call `add_thread` recursively
                 // branch with jump is higher priority
-                // clone the `engine` so we can use it again in the second branch
-                self.add_thread(split, in_idx, next_tok, prog, engine.clone());
-                self.add_thread(pc + 1, in_idx, next_tok, prog, engine);
+                self.consume_(i, token, prog, th.clone().with_pc(split));
+                self.consume_(i, token, prog, th.next());
             }
             Instr::Jump(jump) => {
-                // call `add_thread` recursively
                 // jump to specified pc
-                self.add_thread(jump, in_idx, next_tok, prog, engine);
+                self.consume_(i, token, prog, th.with_pc(jump));
             }
             Instr::Peek(ref args) => {
                 // check if the engine matches here
-                if engine.peek(args, in_idx, next_tok) {
+                if th.engine.peek(args, i, token) {
                     // and recursively add next instruction
-                    self.add_thread(pc + 1, in_idx, next_tok, prog, engine);
+                    self.consume_(i, token, prog, th.next());
                 }
             }
-            // These do not add any new threads
-            Instr::Reject | Instr::Any | Instr::Consume(_) | Instr::Match => {}
+            Instr::Any => {
+                if let Some(token) = token
+                    && th.engine.any(i, token)
+                {
+                    self.current.push_back(th.next());
+                }
+            }
+            Instr::Consume(ref args) => {
+                if let Some(token) = token
+                    && th.engine.consume(args, i, token)
+                {
+                    self.current.push_back(th.next());
+                }
+            }
+            Instr::Match => {
+                self.matches.insert(th.engine);
+            }
+            // Reject match
+            Instr::Reject => {}
         }
-    }
-
-    fn add_match(&mut self, engine: E) {
-        self.threads.insert(Thread::new_match(engine));
     }
 }
 
